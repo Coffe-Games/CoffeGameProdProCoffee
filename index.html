@@ -271,6 +271,91 @@
         else resizeDesktopCanvas916Contain();
       }
 
+      // ============ FETCH RETRY LOGIC ============
+      // Перехватываем fetch для автопереподключения при обрыве сети
+      (function () {
+        var originalFetch = window.fetch;
+        var MAX_RETRIES = 3;
+        var RETRY_DELAYS = [2000, 4000, 6000]; // нарастающая задержка
+
+        // Только для файлов билда (wasm, data, framework)
+        function isBuildFile(url) {
+          var s = typeof url === "string" ? url : (url && url.url ? url.url : "");
+          return /\.(wasm|data|unityweb|js)(\?|$)/i.test(s) || s.indexOf("Build/") !== -1;
+        }
+
+        function showRetryStatus(attempt, maxRetries) {
+          var el = document.getElementById("loading-text-img");
+          if (el) {
+            el.style.display = "none"; // скрываем картинку "ЗАГРУЗКА..."
+          }
+          // Создаём или обновляем текстовый статус
+          var status = document.getElementById("retry-status-text");
+          if (!status) {
+            status = document.createElement("span");
+            status.id = "retry-status-text";
+            status.style.cssText =
+              "position:relative;z-index:3;color:#fff;font-family:FOO,sans-serif;" +
+              "font-size:calc(28px * var(--ui-scale));white-space:nowrap;";
+            var bg = document.getElementById("loading-button-bg");
+            if (bg) bg.appendChild(status);
+          }
+          status.textContent = "Переподключение... " + attempt + "/" + maxRetries;
+        }
+
+        function hideRetryStatus() {
+          var status = document.getElementById("retry-status-text");
+          if (status) status.remove();
+          var el = document.getElementById("loading-text-img");
+          if (el) el.style.display = "";
+        }
+
+        window.fetch = function (resource, options) {
+          // Не трогаем запросы не к билду (аналитика, telegram и т.д.)
+          if (!isBuildFile(resource)) {
+            return originalFetch.call(this, resource, options);
+          }
+
+          var attempt = 0;
+
+          function tryFetch() {
+            attempt++;
+            return originalFetch.call(window, resource, options)
+              .then(function (response) {
+                if (response.ok) {
+                  if (attempt > 1) hideRetryStatus();
+                  return response;
+                }
+                // Сервер ответил, но с ошибкой (404, 500, ...)
+                if (attempt < MAX_RETRIES) {
+                  console.warn("[Retry] HTTP " + response.status + " — attempt " + attempt + "/" + MAX_RETRIES + ":", resource);
+                  showRetryStatus(attempt, MAX_RETRIES);
+                  return new Promise(function (resolve) {
+                    setTimeout(resolve, RETRY_DELAYS[attempt - 1] || 4000);
+                  }).then(tryFetch);
+                }
+                if (attempt > 1) hideRetryStatus();
+                return response;
+              })
+              .catch(function (error) {
+                // Сетевой обрыв — именно тот Failed to fetch
+                if (attempt < MAX_RETRIES) {
+                  console.warn("[Retry] Network error — attempt " + attempt + "/" + MAX_RETRIES + ":", resource, error.message);
+                  showRetryStatus(attempt, MAX_RETRIES);
+                  return new Promise(function (resolve) {
+                    setTimeout(resolve, RETRY_DELAYS[attempt - 1] || 4000);
+                  }).then(tryFetch);
+                }
+                if (attempt > 1) hideRetryStatus();
+                throw error;
+              });
+          }
+
+          return tryFetch();
+        };
+      })();
+      // ============ END FETCH RETRY LOGIC ============
+
       var buildUrl = "Build";
       var loaderUrl = buildUrl + "/10.loader.js";
 
@@ -300,7 +385,21 @@
           .then(() => {
             document.getElementById("unity-loading-bar").style.display = "none";
           })
-          .catch((msg) => alert(msg));
+          .catch((msg) => {
+            // Вместо alert — предлагаем перезагрузить
+            console.error("[Unity] Load failed:", msg);
+            var el = document.getElementById("loading-text-img");
+            if (el) el.style.display = "none";
+            var status = document.getElementById("retry-status-text") || document.createElement("span");
+            status.id = "retry-status-text";
+            status.style.cssText =
+              "position:relative;z-index:3;color:#fff;font-family:FOO,sans-serif;" +
+              "font-size:calc(24px * var(--ui-scale));white-space:nowrap;cursor:pointer;";
+            status.textContent = "Ошибка загрузки. Нажмите чтобы обновить";
+            status.onclick = function () { location.reload(); };
+            var bg = document.getElementById("loading-button-bg");
+            if (bg && !document.getElementById("retry-status-text")) bg.appendChild(status);
+          });
       };
 
       document.body.appendChild(script);
